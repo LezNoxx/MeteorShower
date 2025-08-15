@@ -1,37 +1,40 @@
 // Global state
 let currentStep = 1;
-let walletAdapter = null;
 let connection = null;
 let selectedPool = null;
 let botConfig = {};
+let currentWallet = null;
+let walletData = null;
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
-    initializeWalletAdapter();
     setupEventListeners();
     updateStepVisibility();
+    loadSavedWallet();
 });
-
-// Wallet Adapter Setup
-function initializeWalletAdapter() {
-    try {
-        // Initialize wallet adapters (Phantom, Solflare, etc.)
-        const wallets = [
-            new window.SolanaWalletAdapterWallets.PhantomWalletAdapter(),
-            new window.SolanaWalletAdapterWallets.SolflareWalletAdapter(),
-            new window.SolanaWalletAdapterWallets.TorusWalletAdapter(),
-        ];
-        
-        console.log('Wallet adapters initialized');
-    } catch (error) {
-        console.error('Failed to initialize wallet adapters:', error);
-    }
-}
 
 // Event Listeners Setup
 function setupEventListeners() {
-    // Wallet connection
-    document.getElementById('connectWallet').addEventListener('click', connectWallet);
+    // Wallet management
+    document.getElementById('createWallet').addEventListener('click', () => openWalletModal('create'));
+    document.getElementById('importWallet').addEventListener('click', () => openWalletModal('import'));
+    document.getElementById('closeModal').addEventListener('click', closeWalletModal);
+    document.getElementById('generateWallet').addEventListener('click', generateNewWallet);
+    document.getElementById('importWalletBtn').addEventListener('click', importWallet);
+    document.getElementById('useWallet').addEventListener('click', useGeneratedWallet);
+    document.getElementById('downloadWallet').addEventListener('click', downloadWalletFile);
+    document.getElementById('copyAddress').addEventListener('click', () => copyToClipboard(document.getElementById('generatedAddress').textContent));
+    document.getElementById('copyPrivateKey').addEventListener('click', () => copyToClipboard(document.getElementById('generatedPrivateKey').value));
+    document.getElementById('copyCurrentAddress').addEventListener('click', () => copyToClipboard(document.getElementById('currentWalletAddress').textContent));
+    document.getElementById('refreshBalance').addEventListener('click', updateWalletBalance);
+    document.getElementById('exportWallet').addEventListener('click', exportCurrentWallet);
+    document.getElementById('disconnectWallet').addEventListener('click', disconnectWallet);
+    
+    // Import method selection
+    document.getElementById('importMethod').addEventListener('change', handleImportMethodChange);
+    
+    // RPC presets
+    document.getElementById('rpcPresets').addEventListener('change', handleRpcPresetChange);
     
     // Step navigation
     document.getElementById('testConnection').addEventListener('click', testConnection);
@@ -77,78 +80,324 @@ function setupEventListeners() {
     // Bot controls
     document.getElementById('pauseBot').addEventListener('click', pauseBot);
     document.getElementById('stopBot').addEventListener('click', stopBot);
+    
+    // Modal click outside to close
+    document.getElementById('walletModal').addEventListener('click', (e) => {
+        if (e.target.id === 'walletModal') {
+            closeWalletModal();
+        }
+    });
 }
 
-// Wallet Connection
-async function connectWallet() {
+// Wallet Management Functions
+function openWalletModal(mode) {
+    const modal = document.getElementById('walletModal');
+    const createForm = document.getElementById('createWalletForm');
+    const importForm = document.getElementById('importWalletForm');
+    const generatedResult = document.getElementById('walletGenerated');
+    const modalTitle = document.getElementById('modalTitle');
+    
+    // Reset forms
+    createForm.classList.add('hidden');
+    importForm.classList.add('hidden');
+    generatedResult.classList.add('hidden');
+    
+    if (mode === 'create') {
+        modalTitle.textContent = 'Créer un nouveau wallet';
+        createForm.classList.remove('hidden');
+    } else {
+        modalTitle.textContent = 'Importer un wallet';
+        importForm.classList.remove('hidden');
+    }
+    
+    modal.classList.remove('hidden');
+}
+
+function closeWalletModal() {
+    document.getElementById('walletModal').classList.add('hidden');
+    // Clear sensitive data
+    document.getElementById('generatedPrivateKey').value = '';
+    document.getElementById('privateKeyInput').value = '';
+    document.getElementById('mnemonicInput').value = '';
+}
+
+async function generateNewWallet() {
     try {
-        const connectBtn = document.getElementById('connectWallet');
-        connectBtn.textContent = 'Connecting...';
-        connectBtn.disabled = true;
+        showLoading('Génération du wallet...');
         
-        // Check if Phantom is available
-        if (window.solana && window.solana.isPhantom) {
-            const response = await window.solana.connect();
-            const publicKey = response.publicKey.toString();
-            
-            // Update UI
-            document.getElementById('connectWallet').classList.add('hidden');
-            document.getElementById('walletInfo').classList.remove('hidden');
-            document.querySelector('.wallet-address').textContent = 
-                `${publicKey.slice(0, 4)}...${publicKey.slice(-4)}`;
-            
-            // Get balance
-            await updateWalletBalance();
-            
-            // Update status
-            updateWalletStatus(true);
-            
-            console.log('Wallet connected:', publicKey);
-        } else {
-            throw new Error('Phantom wallet not found. Please install Phantom wallet.');
-        }
+        // Generate new keypair
+        const keypair = window.solanaWeb3.Keypair.generate();
+        const publicKey = keypair.publicKey.toBase58();
+        const privateKey = Array.from(keypair.secretKey);
+        
+        // Store wallet data
+        walletData = {
+            publicKey,
+            privateKey,
+            name: document.getElementById('walletName').value || 'Mon Wallet DLMM'
+        };
+        
+        // Update UI
+        document.getElementById('generatedAddress').textContent = publicKey;
+        document.getElementById('generatedPrivateKey').value = JSON.stringify(privateKey);
+        
+        // Show result
+        document.getElementById('createWalletForm').classList.add('hidden');
+        document.getElementById('walletGenerated').classList.remove('hidden');
+        
+        hideLoading();
+        showToast('Wallet généré avec succès!', 'success');
+        
     } catch (error) {
-        console.error('Wallet connection failed:', error);
-        alert('Failed to connect wallet: ' + error.message);
+        hideLoading();
+        showToast('Erreur lors de la génération du wallet: ' + error.message, 'error');
+    }
+}
+
+async function importWallet() {
+    try {
+        showLoading('Import du wallet...');
         
-        // Reset button
-        const connectBtn = document.getElementById('connectWallet');
-        connectBtn.textContent = 'Connect Wallet';
-        connectBtn.disabled = false;
+        const method = document.getElementById('importMethod').value;
+        let keypair;
+        
+        switch (method) {
+            case 'privateKey':
+                const privateKeyInput = document.getElementById('privateKeyInput').value.trim();
+                if (!privateKeyInput) {
+                    throw new Error('Veuillez entrer une clé privée');
+                }
+                
+                let privateKeyArray;
+                try {
+                    privateKeyArray = JSON.parse(privateKeyInput);
+                } catch {
+                    // Try to decode as base58
+                    try {
+                        privateKeyArray = Array.from(window.bs58.decode(privateKeyInput));
+                    } catch {
+                        throw new Error('Format de clé privée invalide');
+                    }
+                }
+                
+                keypair = window.solanaWeb3.Keypair.fromSecretKey(new Uint8Array(privateKeyArray));
+                break;
+                
+            case 'mnemonic':
+                const mnemonic = document.getElementById('mnemonicInput').value.trim();
+                if (!mnemonic) {
+                    throw new Error('Veuillez entrer une phrase mnémotechnique');
+                }
+                
+                // For now, show error as mnemonic import requires additional libraries
+                throw new Error('Import par phrase mnémotechnique non encore supporté. Utilisez la clé privée.');
+                
+            case 'keyfile':
+                const fileInput = document.getElementById('keyfileInput');
+                if (!fileInput.files[0]) {
+                    throw new Error('Veuillez sélectionner un fichier');
+                }
+                
+                const fileContent = await readFileAsText(fileInput.files[0]);
+                const keyData = JSON.parse(fileContent);
+                keypair = window.solanaWeb3.Keypair.fromSecretKey(new Uint8Array(keyData));
+                break;
+                
+            default:
+                throw new Error('Méthode d\'import non supportée');
+        }
+        
+        // Store wallet data
+        walletData = {
+            publicKey: keypair.publicKey.toBase58(),
+            privateKey: Array.from(keypair.secretKey),
+            name: document.getElementById('importWalletName').value || 'Wallet Importé'
+        };
+        
+        await useWallet(walletData);
+        closeWalletModal();
+        hideLoading();
+        showToast('Wallet importé avec succès!', 'success');
+        
+    } catch (error) {
+        hideLoading();
+        showToast('Erreur lors de l\'import: ' + error.message, 'error');
+    }
+}
+
+function useGeneratedWallet() {
+    if (walletData) {
+        useWallet(walletData);
+        closeWalletModal();
+        showToast('Wallet activé avec succès!', 'success');
+    }
+}
+
+async function useWallet(wallet) {
+    currentWallet = wallet;
+    
+    // Save to localStorage
+    localStorage.setItem('meteorshower_wallet', JSON.stringify({
+        publicKey: wallet.publicKey,
+        privateKey: wallet.privateKey,
+        name: wallet.name
+    }));
+    
+    // Update UI
+    updateWalletDisplay();
+    await updateWalletBalance();
+    
+    // Update step validation
+    updateNextStepButton();
+}
+
+function updateWalletDisplay() {
+    if (currentWallet) {
+        // Hide wallet creation buttons
+        document.querySelector('.wallet-controls').style.display = 'none';
+        
+        // Show wallet info
+        document.getElementById('walletInfo').classList.remove('hidden');
+        document.querySelector('.wallet-address').textContent = 
+            `${currentWallet.publicKey.slice(0, 4)}...${currentWallet.publicKey.slice(-4)}`;
+        
+        // Update wallet status
+        document.getElementById('walletStatusDisplay').innerHTML = `
+            <div class="status-item">
+                <span class="status-icon">✅</span>
+                <span>Wallet connecté: ${currentWallet.name}</span>
+            </div>
+        `;
+        
+        // Show wallet details
+        document.getElementById('walletDetails').classList.remove('hidden');
+        document.getElementById('currentWalletAddress').textContent = currentWallet.publicKey;
     }
 }
 
 async function updateWalletBalance() {
+    if (!currentWallet || !connection) return;
+    
     try {
-        if (!window.solana || !window.solana.publicKey) return;
-        
-        const rpcUrl = document.getElementById('rpcUrl').value || 'https://api.mainnet-beta.solana.com';
-        connection = new window.solanaWeb3.Connection(rpcUrl, 'confirmed');
-        
-        const balance = await connection.getBalance(window.solana.publicKey);
+        const publicKey = new window.solanaWeb3.PublicKey(currentWallet.publicKey);
+        const balance = await connection.getBalance(publicKey);
         const solBalance = balance / window.solanaWeb3.LAMPORTS_PER_SOL;
         
         document.querySelector('.wallet-balance').textContent = `${solBalance.toFixed(4)} SOL`;
+        document.getElementById('currentWalletBalance').textContent = `${solBalance.toFixed(4)} SOL`;
         document.getElementById('availableBalance').textContent = Math.max(0, solBalance - 0.07).toFixed(4);
         
     } catch (error) {
         console.error('Failed to get wallet balance:', error);
-        document.querySelector('.wallet-balance').textContent = 'Error loading balance';
+        document.querySelector('.wallet-balance').textContent = 'Erreur de chargement';
+        document.getElementById('currentWalletBalance').textContent = 'Erreur';
     }
+}
+
+function loadSavedWallet() {
+    const saved = localStorage.getItem('meteorshower_wallet');
+    if (saved) {
+        try {
+            const wallet = JSON.parse(saved);
+            currentWallet = wallet;
+            updateWalletDisplay();
+        } catch (error) {
+            console.error('Failed to load saved wallet:', error);
+            localStorage.removeItem('meteorshower_wallet');
+        }
+    }
+}
+
+function exportCurrentWallet() {
+    if (!currentWallet) return;
+    
+    const walletData = {
+        name: currentWallet.name,
+        publicKey: currentWallet.publicKey,
+        privateKey: currentWallet.privateKey
+    };
+    
+    downloadJSON(walletData, `${currentWallet.name.replace(/\s+/g, '_')}_wallet.json`);
+    showToast('Wallet exporté avec succès!', 'success');
+}
+
+function disconnectWallet() {
+    if (confirm('Êtes-vous sûr de vouloir déconnecter ce wallet?')) {
+        currentWallet = null;
+        localStorage.removeItem('meteorshower_wallet');
+        
+        // Reset UI
+        document.querySelector('.wallet-controls').style.display = 'flex';
+        document.getElementById('walletInfo').classList.add('hidden');
+        document.getElementById('walletDetails').classList.add('hidden');
+        document.getElementById('walletStatusDisplay').innerHTML = `
+            <div class="status-item">
+                <span class="status-icon">❌</span>
+                <span>Aucun wallet connecté</span>
+            </div>
+        `;
+        
+        updateNextStepButton();
+        showToast('Wallet déconnecté', 'info');
+    }
+}
+
+function downloadWalletFile() {
+    if (!walletData) return;
+    
+    const filename = `${walletData.name.replace(/\s+/g, '_')}_wallet.json`;
+    downloadJSON(walletData.privateKey, filename);
+    showToast('Fichier wallet téléchargé!', 'success');
+}
+
+// RPC Configuration
+function handleRpcPresetChange() {
+    const preset = document.getElementById('rpcPresets').value;
+    const rpcUrlInput = document.getElementById('rpcUrl');
+    
+    switch (preset) {
+        case 'helius':
+            rpcUrlInput.value = 'https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY';
+            rpcUrlInput.classList.remove('hidden');
+            break;
+        case 'quicknode':
+            rpcUrlInput.value = 'https://YOUR_ENDPOINT.solana-mainnet.quiknode.pro/YOUR_API_KEY/';
+            rpcUrlInput.classList.remove('hidden');
+            break;
+        case 'alchemy':
+            rpcUrlInput.value = 'https://solana-mainnet.g.alchemy.com/v2/YOUR_API_KEY';
+            rpcUrlInput.classList.remove('hidden');
+            break;
+        case 'custom':
+            rpcUrlInput.value = '';
+            rpcUrlInput.classList.remove('hidden');
+            break;
+        case '':
+            rpcUrlInput.classList.add('hidden');
+            break;
+        default:
+            rpcUrlInput.value = preset;
+            rpcUrlInput.classList.add('hidden');
+    }
+    
+    // Reset connection status
+    document.getElementById('rpcStatus').innerHTML = 
+        '<span class="status-icon">⏳</span><span>Connexion RPC: Non testée</span>';
+    updateNextStepButton();
 }
 
 // Connection Testing
 async function testConnection() {
-    const rpcUrl = document.getElementById('rpcUrl').value;
+    const rpcUrl = document.getElementById('rpcUrl').value || document.getElementById('rpcPresets').value;
     const testBtn = document.getElementById('testConnection');
     const rpcStatus = document.getElementById('rpcStatus');
     
-    if (!rpcUrl) {
-        alert('Please enter an RPC URL');
+    if (!rpcUrl || rpcUrl.includes('YOUR_API_KEY') || rpcUrl.includes('YOUR_ENDPOINT')) {
+        showToast('Veuillez configurer une URL RPC valide', 'error');
         return;
     }
     
-    testBtn.textContent = 'Testing...';
+    testBtn.textContent = 'Test en cours...';
     testBtn.disabled = true;
     
     try {
@@ -159,42 +408,46 @@ async function testConnection() {
         console.log('RPC Version:', version);
         
         // Update status
-        rpcStatus.innerHTML = '<span class="status-icon">✅</span><span>RPC Connection: Connected</span>';
+        rpcStatus.innerHTML = '<span class="status-icon">✅</span><span>Connexion RPC: Connectée</span>';
         
         // Update wallet balance if connected
-        if (window.solana && window.solana.publicKey) {
+        if (currentWallet) {
             await updateWalletBalance();
         }
         
         // Enable next step if wallet is also connected
         updateNextStepButton();
+        showToast('Connexion RPC réussie!', 'success');
         
     } catch (error) {
         console.error('RPC connection failed:', error);
-        rpcStatus.innerHTML = '<span class="status-icon">❌</span><span>RPC Connection: Failed</span>';
-        alert('RPC connection failed: ' + error.message);
+        rpcStatus.innerHTML = '<span class="status-icon">❌</span><span>Connexion RPC: Échec</span>';
+        showToast('Échec de la connexion RPC: ' + error.message, 'error');
     } finally {
-        testBtn.textContent = 'Test Connection';
+        testBtn.textContent = 'Tester la connexion';
         testBtn.disabled = false;
     }
 }
 
-function updateWalletStatus(connected) {
-    const walletStatus = document.getElementById('walletStatus');
-    if (connected) {
-        walletStatus.innerHTML = '<span class="status-icon">✅</span><span>Wallet: Connected</span>';
-    } else {
-        walletStatus.innerHTML = '<span class="status-icon">❌</span><span>Wallet: Not connected</span>';
-    }
-    updateNextStepButton();
-}
-
 function updateNextStepButton() {
-    const rpcConnected = document.getElementById('rpcStatus').textContent.includes('Connected');
-    const walletConnected = document.getElementById('walletStatus').textContent.includes('Connected');
+    const rpcConnected = document.getElementById('rpcStatus').textContent.includes('Connectée');
+    const walletConnected = currentWallet !== null;
     const nextBtn = document.getElementById('nextStep1');
     
     nextBtn.disabled = !(rpcConnected && walletConnected);
+}
+
+// Import method handling
+function handleImportMethodChange() {
+    const method = document.getElementById('importMethod').value;
+    
+    // Hide all import methods
+    document.querySelectorAll('.import-method').forEach(el => {
+        el.classList.add('hidden');
+    });
+    
+    // Show selected method
+    document.getElementById(method + 'Import').classList.remove('hidden');
 }
 
 // Step Navigation
@@ -241,13 +494,13 @@ function updateProgressBar() {
 function validateCurrentStep() {
     switch (currentStep) {
         case 1:
-            return document.getElementById('rpcStatus').textContent.includes('Connected') &&
-                   document.getElementById('walletStatus').textContent.includes('Connected');
+            return document.getElementById('rpcStatus').textContent.includes('Connectée') &&
+                   currentWallet !== null;
         case 2:
-            return selectedPool !== null;
-        case 3:
             const solAmount = parseFloat(document.getElementById('solAmount').value);
             return solAmount > 0 && solAmount >= 0.001;
+        case 3:
+            return selectedPool !== null;
         case 4:
             return true; // Risk management is optional
         default:
@@ -273,7 +526,7 @@ function selectPool(poolAddress) {
     loadPoolInfo(poolAddress);
     
     // Enable next step
-    document.getElementById('nextStep2').disabled = false;
+    document.getElementById('nextStep3').disabled = false;
 }
 
 function handleCustomPoolInput(event) {
@@ -287,11 +540,11 @@ function handleCustomPoolInput(event) {
         
         selectedPool = poolAddress;
         loadPoolInfo(poolAddress);
-        document.getElementById('nextStep2').disabled = false;
+        document.getElementById('nextStep3').disabled = false;
     } else {
         selectedPool = null;
         document.getElementById('poolInfo').classList.add('hidden');
-        document.getElementById('nextStep2').disabled = true;
+        document.getElementById('nextStep3').disabled = true;
     }
 }
 
@@ -302,10 +555,10 @@ async function loadPoolInfo(poolAddress) {
         const poolInfo = document.getElementById('poolInfo');
         
         // Show loading state
-        document.getElementById('tokenX').textContent = 'Loading...';
-        document.getElementById('tokenY').textContent = 'Loading...';
-        document.getElementById('binStep').textContent = 'Loading...';
-        document.getElementById('activeBin').textContent = 'Loading...';
+        document.getElementById('tokenX').textContent = 'Chargement...';
+        document.getElementById('tokenY').textContent = 'Chargement...';
+        document.getElementById('binStep').textContent = 'Chargement...';
+        document.getElementById('activeBin').textContent = 'Chargement...';
         
         poolInfo.classList.remove('hidden');
         
@@ -320,13 +573,14 @@ async function loadPoolInfo(poolAddress) {
                 document.getElementById('tokenX').textContent = 'Token X';
                 document.getElementById('tokenY').textContent = 'Token Y';
                 document.getElementById('binStep').textContent = '25 bp';
-                document.getElementById('activeBin').textContent = 'Unknown';
+                document.getElementById('activeBin').textContent = 'Inconnu';
             }
         }, 1000);
         
     } catch (error) {
         console.error('Failed to load pool info:', error);
         document.getElementById('poolInfo').classList.add('hidden');
+        showToast('Erreur lors du chargement des informations du pool', 'error');
     }
 }
 
@@ -334,7 +588,7 @@ async function loadPoolInfo(poolAddress) {
 function handleRpcUrlChange() {
     // Reset connection status when URL changes
     document.getElementById('rpcStatus').innerHTML = 
-        '<span class="status-icon">⏳</span><span>RPC Connection: Not tested</span>';
+        '<span class="status-icon">⏳</span><span>Connexion RPC: Non testée</span>';
     updateNextStepButton();
 }
 
@@ -351,6 +605,7 @@ function updateCapitalDisplay() {
     const solAmountInput = document.getElementById('solAmount');
     if (amount > available) {
         solAmountInput.style.borderColor = '#ef4444';
+        showToast('Montant supérieur au solde disponible', 'warning');
     } else {
         solAmountInput.style.borderColor = '#e5e7eb';
     }
@@ -439,27 +694,28 @@ function updateConfigurationSummary() {
     const stopLossPercent = document.getElementById('stopLossPercent').value;
     
     document.getElementById('summaryPool').textContent = 
-        poolAddress === '6wJ7W3oHj7ex6MVFp2o26NSof3aey7U8Brs8E371WCXA' ? 'SOL/USDC' : 'Custom Pool';
+        poolAddress === '6wJ7W3oHj7ex6MVFp2o26NSof3aey7U8Brs8E371WCXA' ? 'SOL/USDC' : 'Pool personnalisé';
     document.getElementById('summaryCapital').textContent = `${solAmount} SOL`;
     document.getElementById('summaryAllocation').textContent = `${100 - allocation}% / ${allocation}%`;
     document.getElementById('summaryBinSpan').textContent = `${binSpan} bins`;
     document.getElementById('summaryStrategy').textContent = strategy;
     document.getElementById('summaryTakeProfit').textContent = 
-        takeProfitEnabled ? `+${takeProfitPercent}%` : 'Disabled';
+        takeProfitEnabled ? `+${takeProfitPercent}%` : 'Désactivé';
     document.getElementById('summaryStopLoss').textContent = 
-        stopLossEnabled ? `-${stopLossPercent}%` : 'Disabled';
+        stopLossEnabled ? `-${stopLossPercent}%` : 'Désactivé';
 }
 
 // Bot Launch and Control
 async function launchBot() {
     try {
         const launchBtn = document.getElementById('launchBot');
-        launchBtn.textContent = 'Launching...';
+        launchBtn.textContent = 'Lancement...';
         launchBtn.disabled = true;
         
         // Collect all configuration
         botConfig = {
-            rpcUrl: document.getElementById('rpcUrl').value,
+            rpcUrl: document.getElementById('rpcUrl').value || document.getElementById('rpcPresets').value,
+            wallet: currentWallet,
             poolAddress: selectedPool,
             solAmount: parseFloat(document.getElementById('solAmount').value),
             allocation: parseInt(document.getElementById('allocationSlider').value),
@@ -473,17 +729,20 @@ async function launchBot() {
             swaplessBinSpan: parseInt(document.getElementById('swaplessBinSpan').value),
             autoCompound: document.getElementById('autoCompound').checked,
             monitorInterval: parseInt(document.getElementById('monitorInterval').value),
-            priorityFee: parseInt(document.getElementById('priorityFee').value),
-            walletPublicKey: window.solana.publicKey.toString()
+            priorityFee: parseInt(document.getElementById('priorityFee').value)
         };
         
-        console.log('Bot Configuration:', botConfig);
+        console.log('Configuration du bot:', botConfig);
         
-        // Here you would send the configuration to your backend
-        // For now, we'll simulate the launch
-        await simulateBotLaunch();
+        // Generate .env file content
+        const envContent = generateEnvFile(botConfig);
         
-        // Switch to running view
+        // Download .env file
+        downloadText(envContent, 'meteorshower.env');
+        
+        showToast('Configuration téléchargée! Utilisez le fichier .env avec le bot CLI.', 'success');
+        
+        // Switch to running view (simulation)
         currentStep = 'running';
         updateStepVisibility();
         
@@ -492,22 +751,50 @@ async function launchBot() {
         
     } catch (error) {
         console.error('Failed to launch bot:', error);
-        alert('Failed to launch bot: ' + error.message);
+        showToast('Erreur lors du lancement: ' + error.message, 'error');
         
         const launchBtn = document.getElementById('launchBot');
-        launchBtn.textContent = 'Launch Bot';
+        launchBtn.textContent = 'Lancer le bot';
         launchBtn.disabled = false;
     }
 }
 
-async function simulateBotLaunch() {
-    // Simulate API call to backend
-    return new Promise(resolve => {
-        setTimeout(() => {
-            console.log('Bot launched successfully');
-            resolve();
-        }, 2000);
-    });
+function generateEnvFile(config) {
+    return `# Configuration MeteorShower Bot
+# Généré le ${new Date().toLocaleString()}
+
+# ────────────────────────── Network / RPC ──────────────────────────
+RPC_URL=${config.rpcUrl}
+
+# ───────────────────────── Wallet / Keys ───────────────────────────
+WALLET_PATH=./wallet.json
+
+# ──────────────────────── Pool Configuration ───────────────────────
+POOL_ADDRESS=${config.poolAddress}
+TOTAL_BINS_SPAN=${config.binSpan}
+LOWER_COEF=0.5
+LIQUIDITY_STRATEGY_TYPE=${config.strategy}
+
+# ─────────────────────── Fee & Priority Tuning ─────────────────────
+PRIORITY_FEE_MICRO_LAMPORTS=${config.priorityFee}
+SOL_FEE_BUFFER_LAMPORTS=70000000
+PRICE_IMPACT=0.5
+SLIPPAGE=10
+
+# Interval for monitoring (seconds)
+MONITOR_INTERVAL_SECONDS=${config.monitorInterval}
+
+# ───────────────────────── Logging / Misc ──────────────────────────
+LOG_LEVEL=info
+MANUAL=true
+
+# ───────────────────────── Advanced Features ──────────────────────
+${config.takeProfitEnabled ? `TAKE_PROFIT_PERCENT=${config.takeProfitPercent}` : '# TAKE_PROFIT_PERCENT=15'}
+${config.stopLossEnabled ? `STOP_LOSS_PERCENT=${config.stopLossPercent}` : '# STOP_LOSS_PERCENT=10'}
+${config.swaplessRebalance ? `SWAPLESS_REBALANCE=true` : '# SWAPLESS_REBALANCE=false'}
+${config.swaplessRebalance ? `SWAPLESS_BIN_SPAN=${config.swaplessBinSpan}` : '# SWAPLESS_BIN_SPAN=15'}
+${config.autoCompound ? `AUTO_COMPOUND=true` : '# AUTO_COMPOUND=false'}
+`;
 }
 
 function startMonitoringSimulation() {
@@ -543,12 +830,12 @@ function startMonitoringSimulation() {
 }
 
 function pauseBot() {
-    alert('Bot paused. This would pause the monitoring and rebalancing.');
+    showToast('Bot mis en pause (simulation)', 'info');
 }
 
 function stopBot() {
-    if (confirm('Are you sure you want to stop the bot and close the position? This action cannot be undone.')) {
-        alert('Bot stopped and position closed. This would trigger the emergency close functionality.');
+    if (confirm('Êtes-vous sûr de vouloir arrêter le bot et fermer la position?')) {
+        showToast('Bot arrêté et position fermée (simulation)', 'info');
         // Reset to step 1
         currentStep = 1;
         updateStepVisibility();
@@ -557,13 +844,100 @@ function stopBot() {
 }
 
 // Utility Functions
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('Copié dans le presse-papiers!', 'success');
+    }).catch(() => {
+        showToast('Erreur lors de la copie', 'error');
+    });
+}
+
+function downloadJSON(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function downloadText(text, filename) {
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsText(file);
+    });
+}
+
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toastContainer');
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    
+    const icon = {
+        success: '✅',
+        error: '❌',
+        warning: '⚠️',
+        info: 'ℹ️'
+    }[type] || 'ℹ️';
+    
+    toast.innerHTML = `
+        <span class="toast-icon">${icon}</span>
+        <span class="toast-message">${message}</span>
+        <button class="toast-close">&times;</button>
+    `;
+    
+    container.appendChild(toast);
+    
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+        if (toast.parentNode) {
+            toast.parentNode.removeChild(toast);
+        }
+    }, 5000);
+    
+    // Manual close
+    toast.querySelector('.toast-close').addEventListener('click', () => {
+        if (toast.parentNode) {
+            toast.parentNode.removeChild(toast);
+        }
+    });
+}
+
+function showLoading(text = 'Chargement...') {
+    const overlay = document.getElementById('loadingOverlay');
+    const loadingText = overlay.querySelector('.loading-text');
+    loadingText.textContent = text;
+    overlay.classList.remove('hidden');
+}
+
+function hideLoading() {
+    document.getElementById('loadingOverlay').classList.add('hidden');
+}
+
 function formatAddress(address) {
     if (!address) return '';
     return `${address.slice(0, 4)}...${address.slice(-4)}`;
 }
 
 function formatNumber(num, decimals = 2) {
-    return new Intl.NumberFormat('en-US', {
+    return new Intl.NumberFormat('fr-FR', {
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals
     }).format(num);
@@ -572,8 +946,10 @@ function formatNumber(num, decimals = 2) {
 // Error Handling
 window.addEventListener('error', function(event) {
     console.error('Global error:', event.error);
+    showToast('Une erreur inattendue s\'est produite', 'error');
 });
 
 window.addEventListener('unhandledrejection', function(event) {
     console.error('Unhandled promise rejection:', event.reason);
+    showToast('Erreur de promesse non gérée', 'error');
 });
